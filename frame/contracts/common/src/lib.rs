@@ -22,7 +22,7 @@
 use bitflags::bitflags;
 use codec::{Decode, Encode};
 use sp_core::Bytes;
-use sp_runtime::{DispatchError, RuntimeDebug};
+use sp_runtime::{traits::Zero, DispatchError, RuntimeDebug};
 use sp_std::prelude::*;
 
 #[cfg(feature = "std")]
@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Eq, PartialEq, Encode, Decode, RuntimeDebug)]
 #[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "std", serde(rename_all = "camelCase"))]
-pub struct ContractResult<T> {
+pub struct ContractResult<R, Balance> {
 	/// How much gas was consumed during execution.
 	pub gas_consumed: u64,
 	/// How much gas is required as gas limit in order to execute this call.
@@ -45,7 +45,11 @@ pub struct ContractResult<T> {
 	///
 	/// This can only different from [`Self::gas_consumed`] when weight pre charging
 	/// is used. Currently, only `seal_call_runtime` makes use of pre charging.
+	/// Additionally, any `seal_call` or `seal_instantiate` makes use of pre-charging
+	/// when a non-zero `gas_limit` argument is supplied.
 	pub gas_required: u64,
+	/// How much balance was deposited during execution in order to pay for storage.
+	pub storage_deposit: StorageDeposit<Balance>,
 	/// An optional debug message. This message is only filled when explicitly requested
 	/// by the code that calls into the contract. Otherwise it is empty.
 	///
@@ -63,15 +67,16 @@ pub struct ContractResult<T> {
 	#[cfg_attr(feature = "std", serde(with = "as_string"))]
 	pub debug_message: Vec<u8>,
 	/// The execution result of the wasm code.
-	pub result: T,
+	pub result: R,
 }
 
 /// Result type of a `bare_call` call.
-pub type ContractExecResult = ContractResult<Result<ExecReturnValue, DispatchError>>;
+pub type ContractExecResult<Balance> =
+	ContractResult<Result<ExecReturnValue, DispatchError>, Balance>;
 
 /// Result type of a `bare_instantiate` call.
-pub type ContractInstantiateResult<AccountId> =
-	ContractResult<Result<InstantiateReturnValue<AccountId>, DispatchError>>;
+pub type ContractInstantiateResult<AccountId, Balance> =
+	ContractResult<Result<InstantiateReturnValue<AccountId>, DispatchError>, Balance>;
 
 /// Result type of a `get_storage` call.
 pub type GetStorageResult = Result<Option<Vec<u8>>, ContractAccessError>;
@@ -132,6 +137,39 @@ pub enum Code<Hash> {
 	Upload(Bytes),
 	/// The code hash of an on-chain wasm blob.
 	Existing(Hash),
+}
+
+/// The amount of balance that was either charged or refunded in order to pay for storage.
+#[derive(Eq, PartialEq, Encode, Decode, RuntimeDebug)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "std", serde(rename_all = "camelCase"))]
+pub enum StorageDeposit<Balance> {
+	/// The transaction increased overall storage usage.
+	///
+	/// This means that the specified amount of balance was transferred from the call origin
+	/// to the contracts involved.
+	Charge(Balance),
+	/// The transaction reduced storage consumption.
+	///
+	/// This means that the specified amount of balance was transferred from the involved
+	/// contracts to the call origin.
+	Refund(Balance),
+}
+
+impl<Balance: Zero> Default for StorageDeposit<Balance> {
+	fn default() -> Self {
+		Self::Charge(Zero::zero())
+	}
+}
+
+impl<Balance: Zero> StorageDeposit<Balance> {
+	/// Returns how much balance is charged or `0` in case of a refund.
+	pub fn charge_or_zero(self) -> Balance {
+		match self {
+			Self::Charge(amount) => amount,
+			Self::Refund(_) => Zero::zero(),
+		}
+	}
 }
 
 #[cfg(feature = "std")]

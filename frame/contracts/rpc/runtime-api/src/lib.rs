@@ -45,8 +45,9 @@ sp_api::decl_runtime_apis! {
 			dest: AccountId,
 			value: Balance,
 			gas_limit: u64,
+			storage_limit: Option<Balance>,
 			input_data: Vec<u8>,
-		) -> ContractExecResult;
+		) -> ContractExecResult<Balance>;
 
 		/// Instantiate a new contract.
 		///
@@ -55,10 +56,11 @@ sp_api::decl_runtime_apis! {
 			origin: AccountId,
 			endowment: Balance,
 			gas_limit: u64,
+			storage_limit: Option<Balance>,
 			code: Code<Hash>,
 			data: Vec<u8>,
 			salt: Vec<u8>,
-		) -> ContractInstantiateResult<AccountId>;
+		) -> ContractInstantiateResult<AccountId, Balance>;
 
 		/// Query a given storage key in a given contract.
 		///

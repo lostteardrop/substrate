@@ -21,8 +21,9 @@
 
 use crate::{
 	chain_extension::ChainExtension,
-	wasm::{env_def::ImportSatisfyCheck, PrefabWasmModule},
-	Config, Schedule,
+	storage::meter::Diff,
+	wasm::{env_def::ImportSatisfyCheck, OwnerInfo, PrefabWasmModule},
+	AccountIdOf, BalanceOf, CodeHash, Config, Schedule,
 };
 use pwasm_utils::parity_wasm::elements::{self, External, Internal, MemoryType, Type, ValueType};
 use sp_runtime::traits::Hash;
@@ -395,20 +396,34 @@ fn check_and_instrument<C: ImportSatisfyCheck, T: Config>(
 fn do_preparation<C: ImportSatisfyCheck, T: Config>(
 	original_code: Vec<u8>,
 	schedule: &Schedule<T>,
+	owner: AccountIdOf<T>,
 ) -> Result<PrefabWasmModule<T>, &'static str> {
 	let (code, (initial, maximum)) =
 		check_and_instrument::<C, T>(original_code.as_ref(), schedule)?;
+	let deposit = deposit::<T>(code.len(), original_code.len());
 	Ok(PrefabWasmModule {
 		instruction_weights_version: schedule.instruction_weights.version,
 		initial,
 		maximum,
 		_reserved: None,
 		code,
-		original_code_len: original_code.len() as u32,
-		refcount: 1,
 		code_hash: T::Hashing::hash(&original_code),
 		original_code: Some(original_code),
+		owner_info: Some(OwnerInfo { owner, deposit, refcount: 0 }),
 	})
+}
+
+/// Calculate the amount of balance a user needs to put down as deposit for deploying a code.
+fn deposit<T: Config>(code_len: usize, original_len: usize) -> BalanceOf<T> {
+	use sp_std::mem::size_of;
+	let bytes_added = size_of::<PrefabWasmModule<T>>()
+		.saturating_add(code_len)
+		.saturating_add(original_len)
+		.saturating_sub(size_of::<CodeHash<T>>()) as u32;
+	Diff { bytes_added, items_added: 2, ..Default::default() }
+		.to_usage::<T>()
+		.to_deposit()
+		.charge_or_zero()
 }
 
 /// Loads the given module given in `original_code`, performs some checks on it and
@@ -425,8 +440,9 @@ fn do_preparation<C: ImportSatisfyCheck, T: Config>(
 pub fn prepare_contract<T: Config>(
 	original_code: Vec<u8>,
 	schedule: &Schedule<T>,
+	owner: AccountIdOf<T>,
 ) -> Result<PrefabWasmModule<T>, &'static str> {
-	do_preparation::<super::runtime::Env, T>(original_code, schedule)
+	do_preparation::<super::runtime::Env, T>(original_code, schedule, owner)
 }
 
 /// The same as [`prepare_contract`] but without constructing a new [`PrefabWasmModule`]
@@ -461,6 +477,7 @@ pub mod benchmarking {
 	pub fn prepare_contract<T: Config>(
 		original_code: Vec<u8>,
 		schedule: &Schedule<T>,
+		owner: AccountIdOf<T>,
 	) -> Result<PrefabWasmModule<T>, &'static str> {
 		let contract_module = ContractModule::new(&original_code, schedule)?;
 		let memory_limits = get_memory_limits(contract_module.scan_imports::<()>(&[])?, schedule)?;
@@ -470,10 +487,14 @@ pub mod benchmarking {
 			maximum: memory_limits.1,
 			_reserved: None,
 			code: contract_module.into_wasm_code()?,
-			original_code_len: original_code.len() as u32,
-			refcount: 1,
 			code_hash: T::Hashing::hash(&original_code),
 			original_code: Some(original_code),
+			owner_info: Some(OwnerInfo {
+				owner,
+				// this is a helper function for benchmarking which skips deposit collection
+				deposit: Default::default(),
+				refcount: 0,
+			}),
 		})
 	}
 }
@@ -481,10 +502,14 @@ pub mod benchmarking {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::{exec::Ext, schedule::Limits};
+	use crate::{
+		exec::Ext,
+		schedule::Limits,
+		tests::{Test, ALICE},
+	};
 	use std::fmt;
 
-	impl fmt::Debug for PrefabWasmModule<crate::tests::Test> {
+	impl fmt::Debug for PrefabWasmModule<Test> {
 		fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 			write!(f, "PreparedContract {{ .. }}")
 		}
@@ -526,7 +551,7 @@ mod tests {
 					},
 					.. Default::default()
 				};
-				let r = do_preparation::<env::Test, crate::tests::Test>(wasm, &schedule);
+				let r = do_preparation::<env::Test, Test>(wasm, &schedule, ALICE);
 				assert_matches::assert_matches!(r, $($expected)*);
 			}
 		};
